@@ -1,0 +1,45 @@
+name: fanya
+channels:
+  - defaults
+dependencies:
+  - _libgcc_mutex=0.1=main
+  - _openmp_mutex=5.1=51_gnu
+  - beautifulsoup4=4.12.3=py312hd43f75c_0
+  - brotli-python=1.0.9=py312h419075a_9
+  - bzip2=1.0.8=h998d150_6
+  - ca-certificates=2025.2.25=hd43f75c_0
+  - certifi=2025.4.26=py312hd43f75c_0
+  - charset-normalizer=3.3.2=pyhd3eb1b0_0
+  - expat=2.7.1=h419075a_0
+  - gmp=6.3.0=h419075a_0
+  - icu=73.1=h419075a_0
+  - idna=3.7=py312hd43f75c_0
+  - ld_impl_linux-aarch64=2.40=h48e3ba3_0
+  - libffi=3.4.4=h419075a_1
+  - libgcc-ng=11.2.0=h1234567_1
+  - libgomp=11.2.0=h1234567_1
+  - libstdcxx-ng=11.2.0=h1234567_1
+  - libuuid=1.41.5=h998d150_0
+  - libxml2=2.13.8=h6097fa9_0
+  - libxslt=1.1.41=h4b4cad1_0
+  - lxml=5.3.0=py312h39b1f7d_1
+  - ncurses=6.4=h419075a_0
+  - openssl=3.0.16=h998d150_0
+  - pip=25.1=pyhc872135_2
+  - pycryptodome=3.21.0=py312h80c93b5_0
+  - pysocks=1.7.1=py312hd43f75c_0
+  - python=3.12.8=h8edadfe_0
+  - readline=8.2=h998d150_0
+  - requests=2.32.3=py312hd43f75c_1
+  - setuptools=78.1.1=py312hd43f75c_0
+  - soupsieve=2.5=py312hd43f75c_0
+  - sqlite=3.45.3=h998d150_0
+  - tk=8.6.14=h987d8db_0
+  - tzdata=2025b=h04d1e81_0
+  - urllib3=2.3.0=py312hd43f75c_0
+  - wheel=0.45.1=py312hd43f75c_0
+  - xz=5.6.4=h998d150_1
+  - zlib=1.2.13=h998d150_1
+  - pip:
+      - python-docx==1.1.2
+      - typing-extensions==4.13.2
