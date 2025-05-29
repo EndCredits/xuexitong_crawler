@@ -300,7 +300,6 @@ class FanyaCrawler:
                 if page_num == 1:
                     pagenum_pattern = r'pageNum\s*:\s*(\d+)'
                     scripts_in_soup = soup.find("body").find("script")
-                    print(scripts_in_soup)
                     jscode_in_soup = scripts_in_soup.string if scripts_in_soup else ""
                     total_pagenum = re.search(pagenum_pattern, jscode_in_soup)
 
