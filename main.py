@@ -21,6 +21,11 @@ from bs4.element import Tag
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
+import os
+from PIL import Image
+from fpdf import FPDF
+from concurrent.futures import ThreadPoolExecutor
+import tempfile
 
 # 配置日志
 logging.basicConfig(
@@ -62,6 +67,14 @@ class Course:
     cpi: str
     course_name: str
     course_url: str
+
+
+@dataclass
+class Resource:
+    """资料数据类"""
+    dataname: str
+    datatype: str
+    dataid: str
 
 
 class FanyaCrawlerError(Exception):
@@ -119,8 +132,17 @@ class FanyaCrawler:
         'course_list': 'https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata',
         'course_middle': 'https://mooc1.chaoxing.com/visit/stucoursemiddle',
         'work_list': 'https://mooc1.chaoxing.com/mooc2/work/list',
-        'work_view': 'https://mooc1.chaoxing.com/mooc-ans/mooc2/work/view'
+        'work_view': 'https://mooc1.chaoxing.com/mooc-ans/mooc2/work/view',
+        'resources_list': 'https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/stu-datalist',
+        'update_readcount': 'https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/update/update-read-count',
+        'get_wps_preview': 'https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/get-preview-url',
     }
+
+    SUPPORTED_FILE_TYPES = [
+        "ppt",
+        "pptx",
+        "pdf"
+    ]
 
     def __init__(self):
         self.session = requests.Session()
@@ -240,8 +262,7 @@ class FanyaCrawler:
             logger.error(f"获取课程列表失败: {e}")
             raise FanyaCrawlerError(f"获取课程列表失败: {e}")
 
-    def get_assignments(self, course: Course) -> List[Assignment]:
-        """获取课程作业列表"""
+    def _get_workEnc(self, course: Course) -> str:
         try:
             # 获取课程中间页面
             middle_params = {
@@ -259,7 +280,8 @@ class FanyaCrawler:
             middle_response = self.session.get(
                 self.API_ENDPOINTS['course_middle'],
                 params=middle_params,
-                timeout=30
+                timeout=30,
+                allow_redirects=True
             )
             middle_response.raise_for_status()
 
@@ -268,17 +290,69 @@ class FanyaCrawler:
             work_enc_input = soup.find("input", id="workEnc")
             if not work_enc_input:
                 logger.error("未找到工作加密参数")
-                return []
+                return ""
 
-            work_enc = work_enc_input.get("value", "")
+            return str(work_enc_input.get("value", ""))
+        except Exception as e:
+            logger.error(f"获取 workEnc 参数失败: {e}")
+            raise FanyaCrawlerError(f"获取 workEnc 参数失败: {e}")
 
+    def _get_EncAndT(self, course: Course) -> Tuple[str, str]:
+        try:
+            # 获取课程中间页面
+            middle_params = {
+                "courseid": course.course_id,
+                "clazzid": course.class_id,
+                "cpi": course.cpi,
+                "ismooc2": 1,
+                "v": time.time(),
+                "start": 0,
+                "size": 500,
+                "catalogId": 0,
+                "superstarClass": 0,
+            }
+
+            middle_response = self.session.get(
+                self.API_ENDPOINTS['course_middle'],
+                params=middle_params,
+                timeout=30,
+                allow_redirects=True
+            )
+
+            # 提取作业编码参数
+            middle_response.raise_for_status()
+            soup = BeautifulSoup(middle_response.text, "lxml")
+
+            enc_tag = soup.find("input", {"id": "enc", "name": "enc"})
+            enc = ""
+            if isinstance(enc_tag, Tag):
+                enc = enc_tag.get("value")
+            else:
+                raise FanyaCrawlerError(f"无法获取 enc 参数 input 标签: {enc_tag}")
+
+            t_tag = soup.find("input", {"id": "t", "name": "t"})
+            t = ""
+            if isinstance(t_tag, Tag):
+                t = t_tag.get("value")
+            else:
+                raise FanyaCrawlerError(f"无法获取 t 参数 input 标签: {t_tag}")
+
+            return (enc, t)
+
+        except Exception as e:
+            logger.error(f"获取 enc 参数失败: {e}")
+            raise FanyaCrawlerError(f"获取 enc 参数失败: {e}")
+
+    def get_assignments(self, course: Course) -> List[Assignment]:
+        """获取课程作业列表"""
+        try:
             # 获取作业列表
             work_params = {
                 "courseId": course.course_id,
                 "classId": course.class_id,
                 "cpi": course.cpi,
                 "ut": "s",
-                "enc": work_enc,
+                "enc": self._get_workEnc(course),
             }
 
             assignments = []
@@ -363,6 +437,192 @@ class FanyaCrawler:
         except Exception as e:
             logger.error(f"获取作业列表失败: {e}")
             raise FanyaCrawlerError(f"获取作业列表失败: {e}")
+
+    def get_resource_list(self, course: Course) -> Dict[str, Dict[int, str]]:
+        ret = dict()
+
+        self.current_enc, self.current_time = self._get_EncAndT(course)
+
+        def get_folder_detail(params: Dict[str, str]):
+            try:
+                response = self.session.get(self.API_ENDPOINTS['resources_list'],
+                                            params=stu_datalist_payload,
+                                            timeout=30)
+                response.raise_for_status()
+
+                # logger.info(f"Current request header: {response.request.headers}")
+
+                soup = BeautifulSoup(response.text, "lxml")
+                root_dataBody = soup.find("div", {"class": "dataBody"})
+                if isinstance(root_dataBody, Tag):
+                    root_dir = list()
+                    root_directory = root_dataBody.find_all(
+                        "ul", {"class": "dataBody_td"})
+                    for dir in root_directory:
+                        root_dir.append(Resource(
+                                        dataname=dir.get("dataname"),
+                                        datatype=dir.get("type"),
+                                        dataid=dir.get("id")
+                                        ))
+                    return root_dir
+                return list()
+            except Exception as e:
+                logger.error(f"获取文件列表失败: {e}")
+                return list()
+
+        def parse_resourse(resource: Resource):
+            logger.info(f"正在准备解析资源: {resource.dataname}")
+            # 初始化请求参数
+            readcount_payload = {
+                "courseId": course.course_id,
+                "clazzId": course.class_id,
+                "dataId": resource.dataid,
+                "cpi": course.cpi,
+                "ut": "s"
+            }
+
+            # 发起阅读量计数请求
+            response = self.session.get(
+                self.API_ENDPOINTS['update_readcount'],
+                params=readcount_payload,
+                timeout=30,
+                allow_redirects=True
+            )
+
+            update_status = json.loads(response.text)
+            if update_status["msg"] == "success":
+                logger.info("阅读量计数回调成功，开始获取文件")
+            else:
+                logger.error(f"阅读量计数失败: {response.text}")
+                raise FanyaCrawlerError(f"阅读量计数失败: {response.text}")
+
+            preview_payload = {
+                "courseid": course.course_id,
+                "clazzid": course.class_id,
+                "dataId": resource.dataid,
+                "cpi": course.cpi,
+                "ut": "s"
+            }
+
+            # 发起文件获取请求
+            response = self.session.get(
+                self.API_ENDPOINTS['get_wps_preview'],
+                params=preview_payload,
+                timeout=30,
+                allow_redirects=True
+            )
+
+            file_status = json.loads(response.text)
+            preview_url = ""
+            if file_status["status"]:
+                preview_url = file_status["url"]
+                logger.info(f"成功获取文件预览 URL: {preview_url}，准备抓取")
+                image_urls = dict()
+                response = self.session.get(
+                    preview_url,
+                    timeout=30,
+                    allow_redirects=True)
+
+                soup = BeautifulSoup(response.text, "lxml")
+                filebox = soup.find("div", {"class": "fileBox"})
+                if isinstance(filebox, Tag):
+                    all_image_tag = filebox.find_all("li")
+                    for li in all_image_tag:
+                        page = int(li.find("span").text)
+                        imgsrc = li.find("img").get("src")
+                        image_urls[page] = imgsrc
+                    return image_urls
+
+            else:
+                logger.error(f"获取文件预览失败: {response.text}")
+                logger.error(f"Request URL: {response.request.url}")
+                raise FanyaCrawlerError(f"获取文件预览失败: {response.text}")
+
+        # 构造请求头
+        stu_datalist_payload = {
+            "courseid": course.course_id,
+            "clazzid": course.class_id,
+            "cpi": course.cpi,
+            "ut": "s",
+            "t": self.current_time,
+            "stuenc": self.current_enc,
+        }
+
+        # 尝试获取文件列表
+        while True:
+            try:
+                root_dir = get_folder_detail(stu_datalist_payload)
+                if len(root_dir):
+                    logger.info("获取根目录成功")
+                    print("\n请选择需要下载的文件或需要访问的目录:")
+                    print("\n如果有多个文件需要下载，请使用英文逗号分隔，如果是连续的多个文件，请使用 \'-\' 连接")
+
+                    for i in range(1, len(root_dir) + 1):
+                        print(f"({i}). {root_dir[i - 1].dataname}")
+
+                    user_choice = str(
+                        input(f"\n请输入 1 至 {len(root_dir)} 之间的数字: "))
+                    while True:
+                        if '-' in user_choice:
+                            interval = user_choice.split("-")
+                            current_todo = [x for x in range(
+                                int(interval[0]), int(interval[1]) + 1)]
+                            if len(current_todo) > len(root_dir):
+                                raise FanyaCrawlerError(
+                                    f"选择数目 {len(current_todo)} 大于目录项数 {len(root_dir)}")
+                            break
+                        elif ',' in user_choice:
+                            current_todo = [int(x)
+                                            for x in user_choice.split(',')]
+                            if max(current_todo) > len(root_dir):
+                                raise FanyaCrawlerError(f"选择不在范围内")
+                            break
+                        else:
+                            current_todo = int(user_choice)
+                            if current_todo > len(root_dir):
+                                raise FanyaCrawlerError(f"选择不在范围内")
+                            break
+
+                    print(f"\n你的选择是: {current_todo}")
+                    if isinstance(current_todo, int):
+                        if root_dir[current_todo - 1].datatype == "afolder":
+                            logger.info("检测到用户选择了文件夹，正在切换目录")
+                            stu_datalist_payload = {
+                                "courseid": course.course_id,
+                                "dataName": root_dir[current_todo - 1].dataname,
+                                "dataId": root_dir[current_todo - 1].dataid,
+                                "type": 1,
+                                "flag": 0,
+                                "clazzid": course.class_id,
+                                "enc": self.current_enc,
+                                "ut": "s",
+                                "t": self.current_time,
+                                "cpi": course.cpi,
+                                "microTopicId": 0
+                            }
+                            continue
+                        elif root_dir[current_todo - 1].datatype in self.SUPPORTED_FILE_TYPES:
+                            ret[root_dir[current_todo -
+                                1].dataname] = parse_resourse(root_dir[current_todo - 1])
+                            break
+                    elif isinstance(current_todo, list):
+                        for index in current_todo:
+                            if root_dir[index - 1].datatype == "afolder":
+                                logger.error("不支持多选文件夹")
+                                raise FanyaCrawlerError("不支持多选文件夹")
+                            if root_dir[index - 1].datatype in self.SUPPORTED_FILE_TYPES:
+                                ret[root_dir[index -
+                                    1].dataname] = parse_resourse(root_dir[index - 1])
+                        break
+                else:
+                    logger.error("获取根目录失败，可能该课程没有上传资料！")
+                    return dict()
+
+            except Exception as e:
+                logger.error(f"获取文件列表页面失败: {e}")
+                raise FanyaCrawlerError(f"获取文件列表失败: {e}")
+        logger.info(f"成功获取了 {len(ret)} 个资源")
+        return ret
 
     def _normalize_title(self, title: str) -> str:
         """标准化题目标题"""
@@ -681,6 +941,89 @@ class DocumentExporter:
         except Exception as e:
             logger.error(f"JSON导出失败: {e}")
 
+    def exprot_pdf_from_url(self, image_urls: Dict[int, str], filename: str, max_workers=4):
+        """
+        将网络图片按照顺序组合成 PDF 文件
+
+        参数:
+        image_urls: dict - 键为页数，值为图片 URL 的字典
+        output_filename: str - 输出 PDF 文件名
+        max_workers: int - 并发下载图片的最大线程数
+        """
+        logger.info(f"即将开始下载 {filename} 的内容并生成 PDF")
+        logger.info(f"将使用最大 {max_workers} workers 并行下载")
+        # 按页数排序 URL
+        sorted_urls = [url for _, url in sorted(
+            image_urls.items(), key=lambda x: x[0])]
+
+        # 创建临时目录存储下载的图片
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # 下载所有图片（并发下载提高速度）
+            def download_image(url_idx):
+                idx, url = url_idx
+                try:
+                    response = requests.get(url, stream=True, timeout=30)
+                    response.raise_for_status()
+
+                    # 保存到临时文件
+                    img_path = os.path.join(temp_dir, f"page_{idx}.jpg")
+                    with open(img_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    return img_path
+                except Exception as e:
+                    logger.error(f"下载图片失败 (页数 {idx}, URL: {url}): {e}")
+                    return None
+
+            # 使用线程池并发下载
+            image_paths = []
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                results = executor.map(
+                    download_image, enumerate(sorted_urls, start=1))
+                for result in results:
+                    if result:
+                        image_paths.append(result)
+
+            # 按文件名中的页数排序图片路径
+            image_paths.sort(key=lambda x: int(
+                os.path.basename(x).split('_')[1].split('.')[0]))
+
+            # 创建 PDF
+            pdf = FPDF()
+
+            for img_path in image_paths:
+                try:
+                    # 使用PIL检测图片尺寸
+                    with Image.open(img_path) as img:
+                        width_px, height_px = img.size
+
+                        dpi = img.info.get('dpi', (72, 72))
+                        if dpi[0] == 0 or dpi[1] == 0:  # 防止除零错误
+                            dpi = (72, 72)
+
+                        # 计算实际物理尺寸（单位：点）
+                        width_pt = (width_px * 72) / dpi[0]
+                        height_pt = (height_px * 72) / dpi[1]
+
+                    # 添加新页面
+                    pdf.add_page(format=(width_pt, height_pt))
+
+                    # 添加图片到PDF
+                    pdf.image(img_path, x=0, y=0, w=width_pt, h=height_pt)
+                except Exception as e:
+                    logger.error(f"处理图片失败 {img_path}: {e}")
+
+            # 保存PDF
+            pdf.output(os.path.join(self.output_dir, filename + ".pdf"))
+            logger.info(
+                f"PDF 已成功保存至: {os.path.join(self.output_dir, filename + ".pdf")}")
+
+
+CRAWLER_OPERATIONS = {
+    0: "爬取课后题",
+    1: "爬取不提供下载的资料"
+}
+
 
 def main():
     """主函数"""
@@ -731,39 +1074,66 @@ def main():
 
         logger.info(f"选择课程: {selected_course.course_name}")
 
-        # 获取作业列表
-        logger.info("获取作业列表...")
-        assignments = crawler.get_assignments(selected_course)
-        if not assignments:
-            logger.warning("该课程暂无作业")
-            return
+        while True:
+            try:
+                for key, opt in CRAWLER_OPERATIONS.items():
+                    print(f'({key}).{opt}')
+                current_operation = int(input(f"\n请选择您要爬取的数据: "))
+                if 0 <= current_operation <= len(CRAWLER_OPERATIONS) - 1:
+                    operation = current_operation
+                    break
+                else:
+                    print(f"请输入 0 到 {len(CRAWLER_OPERATIONS) - 1} 之间的数字")
+            except ValueError:
+                print("请输入有效的数字")
 
-        # 获取每个作业的题目
-        logger.info("开始爬取作业题目...")
-        for assignment in assignments:
-            logger.info(f"正在处理作业: {assignment.assignment_name}")
-            questions = crawler.get_assignment_questions(assignment)
-            assignment.questions = questions
-            time.sleep(1)  # 避免请求过于频繁
+        logger.info(f'Operation: {CRAWLER_OPERATIONS[operation]}')
 
-        # 导出文档
-        exporter = DocumentExporter(selected_course.course_name)
+        if operation == 0:
+            # 获取作业列表
+            logger.info("获取作业列表...")
+            assignments = crawler.get_assignments(selected_course)
+            if not assignments:
+                logger.warning("该课程暂无作业")
+                return
 
-        if args.format in ["markdown", "all"]:
-            exporter.export_markdown(
-                assignments, with_answers=not args.no_answers)
-            if not args.no_answers:
-                exporter.export_markdown(assignments, with_answers=False)
+            # 获取每个作业的题目
+            logger.info("开始爬取作业题目...")
+            for assignment in assignments:
+                logger.info(f"正在处理作业: {assignment.assignment_name}")
+                questions = crawler.get_assignment_questions(assignment)
+                assignment.questions = questions
+                time.sleep(1)  # 避免请求过于频繁
 
-        if args.format in ["word", "all"]:
-            exporter.export_word(assignments, with_answers=not args.no_answers)
-            if not args.no_answers:
-                exporter.export_word(assignments, with_answers=False)
+            # 导出文档
+            exporter = DocumentExporter(selected_course.course_name)
 
-        if args.format in ["json", "all"]:
-            exporter.export_json(assignments)
+            if args.format in ["markdown", "all"]:
+                exporter.export_markdown(
+                    assignments, with_answers=not args.no_answers)
+                if not args.no_answers:
+                    exporter.export_markdown(assignments, with_answers=False)
 
-        logger.info("所有任务完成！")
+            if args.format in ["word", "all"]:
+                exporter.export_word(
+                    assignments, with_answers=not args.no_answers)
+                if not args.no_answers:
+                    exporter.export_word(assignments, with_answers=False)
+
+            if args.format in ["json", "all"]:
+                exporter.export_json(assignments)
+
+            logger.info("所有任务完成！")
+
+        if operation == 1:
+            logger.info("获取文件列表...")
+            files = crawler.get_resource_list(selected_course)
+            logger.info(f"成功获取文件: {list(files.keys())}")
+
+            exporter = DocumentExporter(selected_course.course_name)
+
+            for filename, file in files.items():
+                exporter.exprot_pdf_from_url(file, filename)
 
     except KeyboardInterrupt:
         logger.info("用户中断程序")
