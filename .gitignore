@@ -3,3 +3,9 @@
 
 # Ignore outputs
 output/
+
+# Ignore pycache
+__pycache__/
+
+# Ignore test pages
+*.html
