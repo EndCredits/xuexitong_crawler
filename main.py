@@ -123,6 +123,8 @@ class FanyaCrawler:
         "填空题": 3,
         "判断题": 4,
         "思维导图": 5,
+        "名词解释": 6,
+        "简答题": 7,
         "其它": 255
     }
 
@@ -737,6 +739,34 @@ class FanyaCrawler:
                     "span", attrs={"class": "rightAnswerContent"}) if answer_div else None
                 correct_answer = correct_tag.get_text(
                     strip=True) if correct_tag else ""
+
+                return Question(
+                    answer_type=answer_type,
+                    question_title=question_title,
+                    correct_answer=correct_answer
+                )
+
+            elif answer_type in [self.ANSWER_TYPES["名词解释"], self.ANSWER_TYPES["简答题"]]:
+                # 名词解释和简答题
+                answer_div = detail.find("div", attrs={"class": "mark_answer"})
+                if answer_div:
+                    # 尝试获取正确答案，如果不可用则获取学生答案
+                    correct_tag = answer_div.find(
+                        "span", attrs={"class": "rightAnswerContent"})
+                    if correct_tag:
+                        # 如果有正确答案
+                        correct_answer = correct_tag.get_text(strip=True)
+                    else:
+                        # 获取学生答案作为替代
+                        stu_answer_tag = answer_div.find(
+                            "dd", attrs={"class": "textwrap stuAnswerContent reserve-newline"}
+                        )
+                        if stu_answer_tag:
+                            correct_answer = stu_answer_tag.get_text(strip=True)
+                        else:
+                            correct_answer = ""
+                else:
+                    correct_answer = ""
 
                 return Question(
                     answer_type=answer_type,
