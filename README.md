@@ -62,20 +62,19 @@
     mkdir .\fanya
     # 完成这一步后你应该能在桌面上找到一个 fanya 文件夹
 
-    # 在国内使用 JsDelivr 镜像
-    cd .\fanya
-    Invoke-WebRequest "https://cdn.jsdelivr.net/gh/EndCredits/xuexitong_crawler@main/environment.yml" -OutFile .\environment.yml
+    # 创建 conda 环境
+    conda create -n fanya python=3.13.9 requests bs4 pycryptodome pillow fpdf2
 
-    # 从 environment 文件创建 conda 环境
-    conda env create -f environment.yml -n fanya
+    # 切换到虚拟环境
+    conda activate fanya
+
+    # 安装 pip 依赖
+    pip install python-docx
     ```
 
 7. 开始使用
 
     ```Powershell
-    # 激活虚拟环境
-    conda activate fanya
-
     # 下载本程序
     Invoke-WebRequest "https://cdn.jsdelivr.net/gh/EndCredits/xuexitong_crawler@main/main.py" -OutFile .\main.py
 
