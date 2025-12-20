@@ -9,3 +9,6 @@ __pycache__/
 
 # Ignore test pages
 *.html
+
+# Ignore DS_Store
+.DS_Store
