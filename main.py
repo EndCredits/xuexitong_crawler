@@ -195,7 +195,8 @@ class ConfigManager:
             self.config = {}
             return
 
-        self.config_path = Path(config_path) if config_path else Path("config.yaml")
+        self.config_path = Path(
+            config_path) if config_path else Path("config.yaml")
         self.config = self.load_config()
 
     def load_config(self) -> Dict:
@@ -227,7 +228,8 @@ class ConfigManager:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
             with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml.safe_dump(config, f, default_flow_style=False, allow_unicode=True)
+                yaml.safe_dump(
+                    config, f, default_flow_style=False, allow_unicode=True)
             logger.info(f"配置文件已保存: {self.config_path}")
         except Exception as e:
             logger.error(f"保存配置文件失败: {e}")
@@ -267,6 +269,7 @@ class ConfigManager:
         })
 
         self.save_config(self.config)
+
 
 class FanyaCrawler:
     """超星学习通爬虫主类"""
@@ -918,7 +921,8 @@ class FanyaCrawler:
                             "dd", attrs={"class": "textwrap stuAnswerContent reserve-newline"}
                         )
                         if stu_answer_tag:
-                            correct_answer = stu_answer_tag.get_text(strip=True)
+                            correct_answer = stu_answer_tag.get_text(
+                                strip=True)
                         else:
                             correct_answer = ""
                 else:
@@ -983,7 +987,8 @@ class FanyaCrawler:
         logger.info(f"开始使用AI解答作业: {assignment.assignment_name}")
 
         for i, question in enumerate(assignment.questions):
-            logger.info(f"正在使用AI解答第 {i+1}/{len(assignment.questions)} 题: {question.question_title[:30]}...")
+            logger.info(
+                f"正在使用AI解答第 {i+1}/{len(assignment.questions)} 题: {question.question_title[:30]}...")
 
             # 使用AI解答题目
             ai_answer = self.ai_solver.solve_question(question)
@@ -1042,7 +1047,8 @@ class DocumentExporter:
 
                             # 如果包含AI答案，也显示
                             if include_ai and question.ai_generated_answer:
-                                f.write(f"AI解析: {question.ai_generated_answer}\n\n")
+                                f.write(
+                                    f"AI解析: {question.ai_generated_answer}\n\n")
                         else:
                             f.write("答案: ____________________\n\n")
 
@@ -1114,7 +1120,8 @@ class DocumentExporter:
                         # 如果包含AI答案，也显示
                         if include_ai and question.ai_generated_answer:
                             ai_para = doc.add_paragraph()
-                            ai_run = ai_para.add_run(f"AI解析: {question.ai_generated_answer}")
+                            ai_run = ai_para.add_run(
+                                f"AI解析: {question.ai_generated_answer}")
                             ai_run.italic = True
                     else:
                         doc.add_paragraph("答案: ____________________")
@@ -1253,6 +1260,7 @@ class DocumentExporter:
             logger.info(
                 f"PDF 已成功保存至: {os.path.join(self.output_dir, filename + ".pdf")}")
 
+
 CRAWLER_OPERATIONS = {
     0: "爬取课后题",
     1: "爬取不提供下载的资料"
@@ -1282,7 +1290,8 @@ def main():
         # 如果用户选择设置AI配置
         if args.setup_ai:
             if yaml is None:
-                logger.error("PyYAML库未安装，无法使用配置文件功能。请运行 'pip install pyyaml' 安装。")
+                logger.error(
+                    "PyYAML库未安装，无法使用配置文件功能。请运行 'pip install pyyaml' 安装。")
                 return
 
             print("AI配置设置")
@@ -1291,11 +1300,13 @@ def main():
             current_config = config_manager.get_ai_config()
 
             # 获取用户输入
-            api_key = input(f"请输入API密钥 (当前: {'*' * 20 if current_config.get('api_key') else '未设置'}): ").strip()
+            api_key = input(
+                f"请输入API密钥 (当前: {'*' * 20 if current_config.get('api_key') else '未设置'}): ").strip()
             if not api_key:
                 api_key = current_config.get('api_key', '')
 
-            base_url = input(f"请输入API基础URL (可选，当前: {current_config.get('base_url', '未设置')}): ").strip()
+            base_url = input(
+                f"请输入API基础URL (可选，当前: {current_config.get('base_url', '未设置')}): ").strip()
             if not base_url:
                 base_url = current_config.get('base_url', '')
 
@@ -1303,7 +1314,8 @@ def main():
             if not model:
                 model = current_config.get('model', '')
 
-            enabled = input(f"是否启用AI功能? (y/N, 当前: {current_config.get('enabled', 'False')}): ").strip().lower()
+            enabled = input(
+                f"是否启用AI功能? (y/N, 当前: {current_config.get('enabled', 'False')}): ").strip().lower()
             if enabled == '':
                 enabled = current_config.get('enabled', False)
             else:
@@ -1423,7 +1435,8 @@ def main():
             exporter = DocumentExporter(selected_course.course_name)
 
             # 确定是否包含AI答案
-            include_ai = ai_config.get('enabled', False) and crawler.ai_solver is not None
+            include_ai = ai_config.get(
+                'enabled', False) and crawler.ai_solver is not None
 
             if args.format in ["markdown", "all"]:
                 exporter.export_markdown(
@@ -1435,7 +1448,8 @@ def main():
                 exporter.export_word(
                     assignments, with_answers=not args.no_answers, include_ai=include_ai)
                 if not args.no_answers and not include_ai:
-                    exporter.export_word(assignments, with_answers=False, include_ai=include_ai)
+                    exporter.export_word(
+                        assignments, with_answers=False, include_ai=include_ai)
 
             if args.format in ["json", "all"]:
                 exporter.export_json(assignments, include_ai=include_ai)
