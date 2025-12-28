@@ -14,6 +14,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 from urllib import parse
 from urllib.parse import urlparse
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 import requests
 from bs4 import BeautifulSoup
@@ -26,6 +30,12 @@ from PIL import Image
 from fpdf import FPDF
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
+
+# OpenAI兼容API相关导入
+try:
+    import openai
+except ImportError:
+    openai = None
 
 # 配置日志
 logging.basicConfig(
@@ -46,6 +56,8 @@ class Question:
     question_title: str
     correct_answer: Union[str, List[str]]
     question_answers: Optional[List[str]] = None
+    ai_generated_answer: Optional[str] = None  # AI生成的答案
+    ai_answer_confirmed: bool = False  # 是否已确认AI答案
 
 
 @dataclass
@@ -113,6 +125,149 @@ class AESCrypto:
             return False, str(e)
 
 
+class AIQuestionSolver:
+    """AI题目解析器，支持OpenAI兼容的API"""
+
+    def __init__(self, api_key: str, base_url: Optional[str] = None, model: str = ""):
+        if openai is None:
+            raise ImportError("openai库未安装，请运行 'pip install openai' 安装")
+
+        self.api_key = api_key
+        self.model = model
+
+        # 配置OpenAI客户端
+        if base_url:
+            self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self.client = openai.OpenAI(api_key=api_key)
+
+    def solve_question(self, question: Question) -> str:
+        """使用AI解决单个题目"""
+        try:
+            # 根据题目类型构建提示词
+            prompt = self._build_prompt(question)
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的教育助手，擅长解答各种类型的题目。请根据题目内容给出准确、简洁的答案。同时请注意不要使用任何 Markdown 语法，只使用文本排版即可。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,  # 降低温度以获得更一致的答案
+                max_tokens=500
+            )
+
+            ai_answer = response.choices[0].message.content.strip()
+            logger.info(f"AI已解答题目: {question.question_title[:50]}...")
+            return ai_answer
+
+        except Exception as e:
+            logger.error(f"AI解答题目失败: {e}")
+            return f"AI解答失败: {str(e)}"
+
+    def _build_prompt(self, question: Question) -> str:
+        """根据题目类型构建AI提示词"""
+        # 确定题目类型
+        type_names = {v: k for k, v in FanyaCrawler.ANSWER_TYPES.items()}
+        question_type = type_names.get(question.answer_type, "未知题型")
+
+        prompt = f"题目类型: {question_type}\n"
+        prompt += f"题目: {question.question_title}\n"
+
+        # 如果是选择题，添加选项
+        if question.question_answers:
+            prompt += "选项:\n"
+            for i, option in enumerate(question.question_answers, 1):
+                prompt += f"{i}. {option.strip()}\n"
+
+        prompt += "\n请给出这道题的正确答案，并简要说明解题思路。"
+
+        return prompt
+
+
+class ConfigManager:
+    """配置管理器，处理配置文件的读取和保存"""
+
+    def __init__(self, config_path: Optional[str] = None):
+        if yaml is None:
+            logger.warning("PyYAML库未安装，配置文件功能不可用。请运行 'pip install pyyaml' 安装。")
+            self.config_path = None
+            self.config = {}
+            return
+
+        self.config_path = Path(config_path) if config_path else Path("config.yaml")
+        self.config = self.load_config()
+
+    def load_config(self) -> Dict:
+        """加载配置文件"""
+        if self.config_path is None:
+            return {}
+
+        if self.config_path.exists():
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+                logger.info(f"配置文件已加载: {self.config_path}")
+                return config
+            except Exception as e:
+                logger.error(f"加载配置文件失败: {e}")
+                return {}
+        else:
+            logger.info("配置文件不存在，将使用默认配置")
+            return {}
+
+    def save_config(self, config: Dict):
+        """保存配置文件"""
+        if self.config_path is None:
+            logger.warning("配置文件功能不可用，无法保存配置")
+            return
+
+        try:
+            # 确保目录存在
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                yaml.safe_dump(config, f, default_flow_style=False, allow_unicode=True)
+            logger.info(f"配置文件已保存: {self.config_path}")
+        except Exception as e:
+            logger.error(f"保存配置文件失败: {e}")
+
+    def get_ai_config(self) -> Dict:
+        """获取AI配置"""
+        if yaml is None:
+            return {
+                'api_key': '',
+                'base_url': '',
+                'model': '',
+                'enabled': False
+            }
+
+        ai_config = self.config.get('ai', {})
+        return {
+            'api_key': ai_config.get('api_key', ''),
+            'base_url': ai_config.get('base_url', ''),
+            'model': ai_config.get('model', ''),
+            'enabled': ai_config.get('enabled', False)
+        }
+
+    def set_ai_config(self, api_key: str = '', base_url: str = '', model: str = '', enabled: bool = False):
+        """设置AI配置"""
+        if yaml is None:
+            logger.error("PyYAML库未安装，无法保存配置。请运行 'pip install pyyaml' 安装。")
+            return
+
+        if 'ai' not in self.config:
+            self.config['ai'] = {}
+
+        self.config['ai'].update({
+            'api_key': api_key,
+            'base_url': base_url,
+            'model': model,
+            'enabled': enabled
+        })
+
+        self.save_config(self.config)
+
 class FanyaCrawler:
     """超星学习通爬虫主类"""
 
@@ -146,9 +301,10 @@ class FanyaCrawler:
         "pdf"
     ]
 
-    def __init__(self):
+    def __init__(self, ai_solver: Optional[AIQuestionSolver] = None):
         self.session = requests.Session()
         self.crypto = AESCrypto()
+        self.ai_solver = ai_solver  # AI解析器
         self._setup_session()
 
     def _setup_session(self):
@@ -818,6 +974,27 @@ class FanyaCrawler:
             logger.error(f"获取作业题目失败: {e}")
             return []
 
+    def solve_assignment_questions_with_ai(self, assignment: Assignment) -> List[Question]:
+        """使用AI解决作业中的题目"""
+        if not self.ai_solver:
+            logger.warning("AI解析器未初始化，跳过AI解答")
+            return assignment.questions
+
+        logger.info(f"开始使用AI解答作业: {assignment.assignment_name}")
+
+        for i, question in enumerate(assignment.questions):
+            logger.info(f"正在使用AI解答第 {i+1}/{len(assignment.questions)} 题: {question.question_title[:30]}...")
+
+            # 使用AI解答题目
+            ai_answer = self.ai_solver.solve_question(question)
+            question.ai_generated_answer = ai_answer
+            question.ai_answer_confirmed = True  # 标记AI答案已生成
+
+            time.sleep(0.5)  # 避免请求过于频繁
+
+        logger.info(f"AI解答完成，共解答 {len(assignment.questions)} 道题目")
+        return assignment.questions
+
 
 class DocumentExporter:
     """文档导出器"""
@@ -827,9 +1004,13 @@ class DocumentExporter:
         self.output_dir = Path("output")
         self.output_dir.mkdir(exist_ok=True)
 
-    def export_markdown(self, assignments: List[Assignment], with_answers: bool = True):
+    def export_markdown(self, assignments: List[Assignment], with_answers: bool = True, include_ai: bool = False):
         """导出Markdown格式"""
-        suffix = "带答案" if with_answers else "不带答案"
+        suffix = "带答案"
+        if include_ai:
+            suffix += "_含AI解析"
+        elif not with_answers:
+            suffix = "不带答案"
         filename = self.output_dir / f"{self.course_name}_习题_{suffix}.md"
 
         try:
@@ -858,6 +1039,10 @@ class DocumentExporter:
                                     "正确答案: " + ", ".join(question.correct_answer) + "\n\n")
                             else:
                                 f.write(f"正确答案: {question.correct_answer}\n\n")
+
+                            # 如果包含AI答案，也显示
+                            if include_ai and question.ai_generated_answer:
+                                f.write(f"AI解析: {question.ai_generated_answer}\n\n")
                         else:
                             f.write("答案: ____________________\n\n")
 
@@ -866,7 +1051,7 @@ class DocumentExporter:
         except Exception as e:
             logger.error(f"Markdown导出失败: {e}")
 
-    def export_word(self, assignments: List[Assignment], with_answers: bool = True):
+    def export_word(self, assignments: List[Assignment], with_answers: bool = True, include_ai: bool = False):
         """导出Word格式"""
         try:
             from docx import Document
@@ -876,7 +1061,11 @@ class DocumentExporter:
             logger.error("python-docx库未安装，无法导出Word文档")
             return
 
-        suffix = "带答案" if with_answers else "不带答案"
+        suffix = "带答案"
+        if include_ai:
+            suffix += "_含AI解析"
+        elif not with_answers:
+            suffix = "不带答案"
         filename = self.output_dir / f"{self.course_name}_习题_{suffix}.docx"
 
         try:
@@ -921,6 +1110,12 @@ class DocumentExporter:
                             ans_text = f"正确答案: {question.correct_answer}"
                         run = ans_para.add_run(ans_text)
                         run.bold = True
+
+                        # 如果包含AI答案，也显示
+                        if include_ai and question.ai_generated_answer:
+                            ai_para = doc.add_paragraph()
+                            ai_run = ai_para.add_run(f"AI解析: {question.ai_generated_answer}")
+                            ai_run.italic = True
                     else:
                         doc.add_paragraph("答案: ____________________")
 
@@ -933,14 +1128,18 @@ class DocumentExporter:
         except Exception as e:
             logger.error(f"Word导出失败: {e}")
 
-    def export_json(self, assignments: List[Assignment]):
+    def export_json(self, assignments: List[Assignment], include_ai: bool = False):
         """导出JSON格式（用于备份和数据交换）"""
-        filename = self.output_dir / f"{self.course_name}_习题_数据.json"
+        suffix = "_数据"
+        if include_ai:
+            suffix += "_含AI解析"
+        filename = self.output_dir / f"{self.course_name}_习题{suffix}.json"
 
         try:
             data = {
                 "course_name": self.course_name,
                 "export_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "include_ai": include_ai,
                 "assignments": []
             }
 
@@ -959,6 +1158,12 @@ class DocumentExporter:
                         "correct_answer": question.correct_answer,
                         "options": question.question_answers
                     }
+
+                    # 如果包含AI答案，也添加到数据中
+                    if include_ai:
+                        question_data["ai_generated_answer"] = question.ai_generated_answer
+                        question_data["ai_answer_confirmed"] = question.ai_answer_confirmed
+
                     assignment_data["questions"].append(question_data)
 
                 data["assignments"].append(assignment_data)
@@ -1048,7 +1253,6 @@ class DocumentExporter:
             logger.info(
                 f"PDF 已成功保存至: {os.path.join(self.output_dir, filename + ".pdf")}")
 
-
 CRAWLER_OPERATIONS = {
     0: "爬取课后题",
     1: "爬取不提供下载的资料"
@@ -1066,12 +1270,84 @@ def main():
     parser.add_argument("--format", choices=["markdown", "word", "json", "all"],
                         default="all", help="导出格式")
     parser.add_argument("--no-answers", action="store_true", help="不包含答案")
+    parser.add_argument("--config", help="配置文件路径", default="config.yaml")
+    parser.add_argument("--setup-ai", action="store_true", help="设置AI配置")
 
     args = parser.parse_args()
 
     try:
+        # 初始化配置管理器
+        config_manager = ConfigManager(args.config)
+
+        # 如果用户选择设置AI配置
+        if args.setup_ai:
+            if yaml is None:
+                logger.error("PyYAML库未安装，无法使用配置文件功能。请运行 'pip install pyyaml' 安装。")
+                return
+
+            print("AI配置设置")
+            print("=" * 30)
+
+            current_config = config_manager.get_ai_config()
+
+            # 获取用户输入
+            api_key = input(f"请输入API密钥 (当前: {'*' * 20 if current_config.get('api_key') else '未设置'}): ").strip()
+            if not api_key:
+                api_key = current_config.get('api_key', '')
+
+            base_url = input(f"请输入API基础URL (可选，当前: {current_config.get('base_url', '未设置')}): ").strip()
+            if not base_url:
+                base_url = current_config.get('base_url', '')
+
+            model = input(f"请输入模型名称): ").strip()
+            if not model:
+                model = current_config.get('model', '')
+
+            enabled = input(f"是否启用AI功能? (y/N, 当前: {current_config.get('enabled', 'False')}): ").strip().lower()
+            if enabled == '':
+                enabled = current_config.get('enabled', False)
+            else:
+                enabled = enabled in ['y', 'yes', 'true', '1']
+
+            # 保存配置
+            config_manager.set_ai_config(
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                enabled=enabled
+            )
+
+            print("\nAI配置已保存！")
+            return
+
+        # 从配置文件获取AI配置
+        ai_config = config_manager.get_ai_config()
+
+        # 初始化AI解析器（如果配置了API密钥且启用了AI功能）
+        ai_solver = None
+        if ai_config.get('api_key') and ai_config.get('enabled', False):
+            try:
+                ai_solver = AIQuestionSolver(
+                    api_key=ai_config['api_key'],
+                    base_url=ai_config.get('base_url') or None,
+                    model=ai_config.get('model', '')
+                )
+                logger.info("AI解析器初始化成功")
+            except ImportError as e:
+                logger.error(f"AI功能初始化失败: {e}")
+                # 如果AI功能未正确安装，但用户期望使用AI，则退出
+                if ai_config.get('enabled', False):
+                    logger.error("由于AI功能未正确安装，程序将退出")
+                    return
+            except Exception as e:
+                logger.error(f"AI解析器初始化失败: {e}")
+                # 如果AI配置有问题，但用户期望使用AI，则退出
+                if ai_config.get('enabled', False):
+                    logger.error("程序将退出")
+                    return
+
         # 初始化爬虫
-        crawler = FanyaCrawler()
+        crawler = FanyaCrawler(ai_solver=ai_solver)
 
         # 登录
         logger.info("开始登录...")
@@ -1135,23 +1411,34 @@ def main():
                 assignment.questions = questions
                 time.sleep(1)  # 避免请求过于频繁
 
+            # 如果启用了AI功能，使用AI解答题目
+            if ai_config.get('enabled', False) and crawler.ai_solver:
+                logger.info("开始使用AI解答题目...")
+                for assignment in assignments:
+                    logger.info(f"正在AI解答作业: {assignment.assignment_name}")
+                    crawler.solve_assignment_questions_with_ai(assignment)
+                    time.sleep(1)  # 避免请求过于频繁
+
             # 导出文档
             exporter = DocumentExporter(selected_course.course_name)
 
+            # 确定是否包含AI答案
+            include_ai = ai_config.get('enabled', False) and crawler.ai_solver is not None
+
             if args.format in ["markdown", "all"]:
                 exporter.export_markdown(
-                    assignments, with_answers=not args.no_answers)
-                if not args.no_answers:
+                    assignments, with_answers=not args.no_answers, include_ai=include_ai)
+                if not args.no_answers and not include_ai:
                     exporter.export_markdown(assignments, with_answers=False)
 
             if args.format in ["word", "all"]:
                 exporter.export_word(
-                    assignments, with_answers=not args.no_answers)
-                if not args.no_answers:
-                    exporter.export_word(assignments, with_answers=False)
+                    assignments, with_answers=not args.no_answers, include_ai=include_ai)
+                if not args.no_answers and not include_ai:
+                    exporter.export_word(assignments, with_answers=False, include_ai=include_ai)
 
             if args.format in ["json", "all"]:
-                exporter.export_json(assignments)
+                exporter.export_json(assignments, include_ai=include_ai)
 
             logger.info("所有任务完成！")
 

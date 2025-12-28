@@ -10,10 +10,10 @@
 
 ## ✨ 特性
 
-1. 支持将题目导出为 Markdown, Word (由 python-docx 强力驱动), json 格式 
+1. 支持将题目导出为 Markdown, Word (由 python-docx 强力驱动), json 格式
 2. 支持获取教师没有开放下载的 ppt, pptx, pdf 资源 (目前只能获取到图片 pdf )
 3. 全流程模拟正常浏览器行为，避免被检测封号
-4. 没了
+4. 支持AI功能，可使用大语言模型解答题目
 
 ## 🥳开始使用
 
@@ -63,7 +63,7 @@
     # 完成这一步后你应该能在桌面上找到一个 fanya 文件夹
 
     # 创建 conda 环境
-    conda create -n fanya python=3.13.9 requests bs4 pycryptodome pillow fpdf2
+    conda create -n fanya python=3.13.9 requests bs4 pycryptodome pillow fpdf2 openai pyyaml
 
     # 切换到虚拟环境
     conda activate fanya
@@ -85,11 +85,54 @@
     python .\main.py --format word <phone numebr> <password>
     ```
 
+## 🤖 AI功能使用
+
+本工具支持使用AI大语言模型来解答题目，支持所有与OpenAI API兼容的服务。
+
+### 配置AI功能
+
+首次使用AI功能需要配置API密钥，可以使用以下命令：
+
+```bash
+python main.py <phone> <password> --setup-ai
+```
+
+这将引导您输入API密钥、基础URL、模型名称等信息，并自动保存到配置文件中。
+
+### 配置文件说明
+
+配置文件使用YAML格式，默认为 `config.yaml`：
+
+```yaml
+# 超星学习通爬虫配置文件
+ai:
+  # 是否启用AI功能
+  enabled: false
+
+  # OpenAI API密钥
+  api_key: ""
+
+  # OpenAI API基础URL (可选，用于自定义API端点)
+  base_url: ""
+
+  # 使用的模型
+  model: ""
+```
+
+### 支持的API服务
+
+本工具支持所有与OpenAI API兼容的服务，包括：
+- OpenAI
+- Azure OpenAI
+- OpenRouter
+- 本地部署的LLM服务（如Ollama、llama.cpp等）
+- 其他兼容OpenAI API格式的服务
+
 ## 🔨 Development (Code of Conduct)
 
 1. Please use the coding style recommended by PEP8 to format your code
 
-## ⏳ TODO 
+## ⏳ TODO
 
  - ⭕ 实现 WebUI 并托管
  - ⭕ 适配更多题型

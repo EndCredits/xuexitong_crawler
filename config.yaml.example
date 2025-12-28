@@ -1,0 +1,13 @@
+# 超星学习通爬虫配置文件
+ai:
+  # 是否启用AI功能
+  enabled: false
+  
+  # OpenAI API密钥
+  api_key: ""
+  
+  # OpenAI API基础URL (可选，用于自定义API端点)
+  base_url: ""
+  
+  # 使用的模型
+  model: "gpt-3.5-turbo"

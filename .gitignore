@@ -12,3 +12,9 @@ __pycache__/
 
 # Ignore DS_Store
 .DS_Store
+
+# Ignore vscode specific files
+.vscode/
+
+# Ignore user config
+config.yaml
