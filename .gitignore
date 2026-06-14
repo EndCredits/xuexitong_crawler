@@ -18,3 +18,6 @@ __pycache__/
 
 # Ignore user config
 config.yaml
+
+# Ignore fetch dir
+fetch/
