@@ -54,7 +54,8 @@ class Question:
     """题目数据类"""
     answer_type: int
     question_title: str
-    correct_answer: Union[str, List[str]]
+    correct_answer: Union[str, List[str]] = ""
+    student_answer: Union[str, List[str]] = ""
     question_answers: Optional[List[str]] = None
     ai_generated_answer: Optional[str] = None  # AI生成的答案
     ai_answer_confirmed: bool = False  # 是否已确认AI答案
@@ -64,10 +65,12 @@ class Question:
 class Assignment:
     """作业数据类"""
     work_id: str
+    answer_id: str
     assignment_name: str
     assignment_status: str
     assignment_url: str
     course_id: str
+    standard_enc: str = ""
     questions: List[Question] = field(default_factory=list)
 
 
@@ -293,6 +296,8 @@ class FanyaCrawler:
         'course_middle': 'https://mooc1.chaoxing.com/visit/stucoursemiddle',
         'work_list': 'https://mooc1.chaoxing.com/mooc2/work/list',
         'work_view': 'https://mooc1.chaoxing.com/mooc-ans/mooc2/work/view',
+        'work_task': 'https://mooc1.chaoxing.com/mooc-ans/mooc2/work/task',
+        'work_dowork': 'https://mooc1.chaoxing.com/mooc-ans/mooc2/work/dowork',
         'resources_list': 'https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/stu-datalist',
         'update_readcount': 'https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/update/update-read-count',
         'get_wps_preview': 'https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/get-preview-url',
@@ -504,6 +509,34 @@ class FanyaCrawler:
             logger.error(f"获取 enc 参数失败: {e}")
             raise FanyaCrawlerError(f"获取 enc 参数失败: {e}")
 
+    def _get_standard_enc_and_redirect_url(self, assignment_url: str) -> Tuple[str, str]:
+        """从 work/task 302 重定向获取 standardEnc 参数和重定向 URL"""
+        try:
+            response = self.session.get(
+                assignment_url,
+                timeout=30,
+                allow_redirects=False
+            )
+            
+            if response.status_code in [301, 302, 303, 307, 308]:
+                location = response.headers.get('Location', '')
+                if location:
+                    parsed_url = urlparse(location)
+                    url_params = parse.parse_qs(parsed_url.query)
+                    standard_enc = url_params.get('standardEnc', [''])[0]
+                    
+                    logger.info(f"重定向到: {location}")
+                    if standard_enc:
+                        logger.info(f"获取到 standardEnc: {standard_enc}")
+                    return standard_enc, location
+            
+            logger.warning("未能获取到重定向 URL")
+            return "", ""
+            
+        except Exception as e:
+            logger.error(f"获取重定向信息失败: {e}")
+            return "", ""
+
     def get_assignments(self, course: Course) -> List[Assignment]:
         """获取课程作业列表"""
         try:
@@ -557,6 +590,7 @@ class FanyaCrawler:
                         url_data = parse.parse_qs(parsed_url.query)
 
                         work_id = url_data.get("workId", [""])[0]
+                        answer_id = url_data.get("answerId", [""])[0]
                         if not work_id:
                             continue
 
@@ -571,6 +605,7 @@ class FanyaCrawler:
 
                         assignment = Assignment(
                             work_id=work_id,
+                            answer_id=answer_id,
                             assignment_name=assignment_name,
                             assignment_status=assignment_status,
                             assignment_url=data_url,
@@ -939,8 +974,350 @@ class FanyaCrawler:
 
         return None
 
+    def _decode_html_entities(self, text: str) -> str:
+        """解码 HTML 实体"""
+        import html
+        return html.unescape(text)
+
+    def _parse_dowork_questions(self, soup: BeautifulSoup) -> List[Question]:
+        """解析 dowork 页面中的用户提交答案"""
+        questions = []
+        
+        try:
+            # 解析填空题 (answertype = 2)
+            # 注意: lxml 解析器会将 typeName 转换为小写 typename
+            fill_blocks = soup.find_all("div", attrs={"typename": "填空题"})
+            for block in fill_blocks:
+                try:
+                    question_id = block.get("data", "")
+                    title_tag = block.find("h3", attrs={"class": "mark_name"})
+                    if not title_tag:
+                        continue
+                    
+                    # 提取题目内容：先移除 colorShallow span，然后获取 p 标签内容
+                    title_clone = title_tag.__copy__()
+                    color_span = title_clone.find("span", attrs={"class": "colorShallow"})
+                    if color_span:
+                        color_span.decompose()
+                    
+                    # 获取序号
+                    question_num = ""
+                    p_tag = title_clone.find("p")
+                    if p_tag:
+                        # 获取 p 标签前的文本作为序号
+                        for sibling in p_tag.previous_siblings:
+                            if isinstance(sibling, str) and sibling.strip():
+                                question_num = sibling.strip()
+                                break
+                    
+                    # 获取题目内容
+                    question_content = ""
+                    if p_tag:
+                        question_content = p_tag.get_text(strip=True)
+                    else:
+                        question_content = title_clone.get_text(strip=True)
+                    
+                    question_title = f"{question_num} {question_content}".strip()
+                    question_title = self._normalize_title(question_title)
+                    
+                    # 获取填空题数量
+                    blank_size_input = block.find("input", attrs={"name": f"tiankongsize{question_id}"})
+                    blank_count = int(blank_size_input.get("value", "1")) if blank_size_input else 1
+                    
+                    student_answers = []
+                    for i in range(1, blank_count + 1):
+                        textarea = block.find("textarea", attrs={"name": f"answerEditor{question_id}{i}"})
+                        if textarea:
+                            answer_text = self._decode_html_entities(textarea.get_text(strip=True))
+                            # 清理 HTML 标签
+                            answer_text = BeautifulSoup(answer_text, "lxml").get_text(strip=True)
+                            student_answers.append(answer_text)
+                        else:
+                            student_answers.append("")
+                    
+                    question = Question(
+                        answer_type=self.ANSWER_TYPES["填空题"],
+                        question_title=question_title,
+                        correct_answer="",
+                        student_answer=student_answers if len(student_answers) > 1 else (student_answers[0] if student_answers else "")
+                    )
+                    questions.append(question)
+                    
+                except Exception as e:
+                    logger.warning(f"解析填空题失败: {e}")
+                    continue
+            
+            # 解析名词解释、简答题 (answertype = 5, 4)
+            for type_name in ["名词解释", "简答题"]:
+                type_blocks = soup.find_all("div", attrs={"typename": type_name})
+                for block in type_blocks:
+                    try:
+                        question_id = block.get("data", "")
+                        title_tag = block.find("h3", attrs={"class": "mark_name"})
+                        if not title_tag:
+                            continue
+                        
+                        # 提取题目内容
+                        title_clone = title_tag.__copy__()
+                        color_span = title_clone.find("span", attrs={"class": "colorShallow"})
+                        if color_span:
+                            color_span.decompose()
+                        
+                        # 获取序号
+                        question_num = ""
+                        p_tags = title_clone.find_all("p")
+                        if p_tags:
+                            # 从第一个 p 标签前的文本获取序号
+                            for sibling in p_tags[0].previous_siblings:
+                                if isinstance(sibling, str) and sibling.strip():
+                                    question_num = sibling.strip()
+                                    break
+                        
+                        # 获取题目内容（合并所有 p 标签）
+                        question_content = ""
+                        if p_tags:
+                            # 合并所有 p 标签的内容，过滤掉空行
+                            p_contents = []
+                            for p in p_tags:
+                                text = p.get_text(strip=True)
+                                if text and text != '<br>':
+                                    p_contents.append(text)
+                            question_content = " ".join(p_contents)
+                        else:
+                            question_content = title_clone.get_text(strip=True)
+                        
+                        question_title = f"{question_num} {question_content}".strip()
+                        question_title = self._normalize_title(question_title)
+                        
+                        # 获取用户答案
+                        textarea = block.find("textarea", attrs={"id": f"answer{question_id}"})
+                        student_answer = ""
+                        if textarea:
+                            # 解码 HTML 实体
+                            answer_html = self._decode_html_entities(textarea.get_text(strip=True))
+                            # 使用 html.parser 解析，保留图片标签
+                            answer_soup = BeautifulSoup(answer_html, "html.parser")
+                            # 检查是否有图片
+                            img_tag = answer_soup.find("img")
+                            if img_tag and img_tag.get("src"):
+                                student_answer = f"[图片] {img_tag.get('src')}"
+                            else:
+                                student_answer = answer_soup.get_text(strip=True)
+                        
+                        question = Question(
+                            answer_type=self.ANSWER_TYPES.get(type_name, 7),
+                            question_title=question_title,
+                            correct_answer="",
+                            student_answer=student_answer
+                        )
+                        questions.append(question)
+                        
+                    except Exception as e:
+                        logger.warning(f"解析{type_name}失败: {e}")
+                        continue
+            
+            # 解析单选题、多选题、判断题（如果有的话）
+            for type_name in ["单选题", "多选题", "判断题"]:
+                type_blocks = soup.find_all("div", attrs={"typename": type_name})
+                for block in type_blocks:
+                    try:
+                        question_id = block.get("data", "")
+                        title_tag = block.find("h3", attrs={"class": "mark_name"})
+                        if not title_tag:
+                            continue
+                        
+                        # 提取题目内容
+                        title_clone = title_tag.__copy__()
+                        color_span = title_clone.find("span", attrs={"class": "colorShallow"})
+                        if color_span:
+                            color_span.decompose()
+                        
+                        question_title = self._normalize_title(title_clone.get_text())
+                        
+                        # 获取用户答案
+                        answer_input = block.find("input", attrs={"id": f"answer{question_id}"})
+                        student_answer = ""
+                        if answer_input:
+                            student_answer = answer_input.get("value", "")
+                        
+                        # 获取选项
+                        question_answers = []
+                        options_ul = block.find("ul", attrs={"class": re.compile(r"mark_letter|colorDeep")})
+                        if options_ul:
+                            question_answers = self._normalize_answers(options_ul.get_text())
+                        
+                        question = Question(
+                            answer_type=self.ANSWER_TYPES.get(type_name, 1),
+                            question_title=question_title,
+                            correct_answer="",
+                            student_answer=student_answer,
+                            question_answers=question_answers
+                        )
+                        questions.append(question)
+                        
+                    except Exception as e:
+                        logger.warning(f"解析{type_name}失败: {e}")
+                        continue
+            
+            logger.info(f"dowork 页面解析到 {len(questions)} 道题目")
+            return questions
+            
+        except Exception as e:
+            logger.error(f"解析 dowork 页面失败: {e}")
+            return []
+    
+    def _extract_answer_content(self, element) -> str:
+        """从元素中提取答案内容，支持文本和图片"""
+        if not element:
+            return ""
+        
+        # 查找图片
+        img_tag = element.find("img", attrs={"class": "ans-ued-img"})
+        if img_tag:
+            img_url = img_tag.get("src", "")
+            if img_url:
+                return f"[图片] {img_url}"
+        
+        # 如果没有图片，获取文本
+        text = element.get_text(strip=True)
+        if text:
+            return text
+        
+        return ""
+    
+    def _parse_view_student_questions(self, soup: BeautifulSoup) -> List[Question]:
+        """解析 view 页面中已截止待批阅作业的用户提交答案"""
+        questions = []
+        
+        try:
+            # 找到所有题目块
+            question_blocks = soup.find_all("div", attrs={"class": "mark_item"})
+            
+            for block in question_blocks:
+                # 找到题型标题
+                type_tit = block.find("h2", attrs={"class": "type_tit"})
+                if not type_tit:
+                    continue
+                
+                type_text = type_tit.get_text(strip=True)
+                
+                # 确定题型
+                answer_type = 0
+                type_name = ""
+                if "填空题" in type_text:
+                    answer_type = self.ANSWER_TYPES["填空题"]
+                    type_name = "填空题"
+                elif "单选题" in type_text:
+                    answer_type = self.ANSWER_TYPES["单选题"]
+                    type_name = "单选题"
+                elif "多选题" in type_text:
+                    answer_type = self.ANSWER_TYPES["多选题"]
+                    type_name = "多选题"
+                elif "判断题" in type_text:
+                    answer_type = self.ANSWER_TYPES["判断题"]
+                    type_name = "判断题"
+                elif "名词解释" in type_text:
+                    answer_type = self.ANSWER_TYPES["名词解释"]
+                    type_name = "名词解释"
+                elif "简答题" in type_text:
+                    answer_type = self.ANSWER_TYPES["简答题"]
+                    type_name = "简答题"
+                else:
+                    continue
+                
+                # 找到所有题目
+                question_divs = block.find_all("div", attrs={"class": "singleQuesId"})
+                
+                for q_div in question_divs:
+                    try:
+                        # 获取题目标题
+                        h3_tag = q_div.find("h3", attrs={"class": "mark_name"})
+                        if not h3_tag:
+                            continue
+                        
+                        # 提取题目内容
+                        qt_content = h3_tag.find("span", attrs={"class": "qtContent"})
+                        if qt_content:
+                            question_content = qt_content.get_text(strip=True)
+                        else:
+                            # 移除 colorShallow span
+                            h3_clone = h3_tag.__copy__()
+                            color_span = h3_clone.find("span", attrs={"class": "colorShallow"})
+                            if color_span:
+                                color_span.decompose()
+                            question_content = h3_clone.get_text(strip=True)
+                        
+                        question_title = self._normalize_title(question_content)
+                        
+                        # 获取用户答案
+                        student_answer = ""
+                        
+                        if type_name == "填空题":
+                            # 填空题：查找所有 answer_span
+                            answer_spans = q_div.find_all("span", attrs={"class": re.compile(r"answer_span.*stuAnswerContent")})
+                            if answer_spans:
+                                answers = []
+                                for span in answer_spans:
+                                    ans_text = self._extract_answer_content(span)
+                                    # 移除序号如 "(1) "
+                                    ans_text = re.sub(r'^\(\d+\)\s*', '', ans_text)
+                                    if ans_text:
+                                        answers.append(ans_text)
+                                student_answer = answers if len(answers) > 1 else (answers[0] if answers else "")
+                        
+                        elif type_name in ["名词解释", "简答题"]:
+                            # 名词解释、简答题：查找 stuAnswerContent
+                            answer_dd = q_div.find("dd", attrs={"class": re.compile(r"stuAnswerContent")})
+                            if answer_dd:
+                                student_answer = self._extract_answer_content(answer_dd)
+                        
+                        elif type_name in ["单选题", "多选题", "判断题"]:
+                            # 选择题：查找 stuAnswerContent 或 input
+                            answer_dd = q_div.find("dd", attrs={"class": re.compile(r"stuAnswerContent")})
+                            if answer_dd:
+                                student_answer = self._extract_answer_content(answer_dd)
+                            else:
+                                answer_input = q_div.find("input", attrs={"id": re.compile(r"^answer\d+")})
+                                if answer_input:
+                                    student_answer = answer_input.get("value", "")
+                        
+                        # 获取选项（选择题）
+                        question_answers = []
+                        if type_name in ["单选题", "多选题"]:
+                            options_ul = q_div.find("ul", attrs={"class": re.compile(r"mark_letter|colorDeep")})
+                            if options_ul:
+                                question_answers = self._normalize_answers(options_ul.get_text())
+                        
+                        question = Question(
+                            answer_type=answer_type,
+                            question_title=question_title,
+                            correct_answer="",
+                            student_answer=student_answer,
+                            question_answers=question_answers if question_answers else None
+                        )
+                        questions.append(question)
+                        
+                    except Exception as e:
+                        logger.warning(f"解析题目失败: {e}")
+                        continue
+            
+            logger.info(f"view 页面解析到 {len(questions)} 道题目")
+            return questions
+            
+        except Exception as e:
+            logger.error(f"解析 view 页面失败: {e}")
+            return []
+
     def get_assignment_questions(self, assignment: Assignment) -> List[Question]:
-        """获取作业题目"""
+        """获取作业题目，根据作业状态选择不同策略"""
+        # 判断作业状态：已完成获取正确答案，待批阅获取用户答案
+        if "已完成" in assignment.assignment_status:
+            return self._get_completed_assignment_questions(assignment)
+        else:
+            return self._get_pending_assignment_questions(assignment)
+    
+    def _get_completed_assignment_questions(self, assignment: Assignment) -> List[Question]:
+        """获取已完成作业的正确答案"""
         try:
             parsed_url = urlparse(assignment.assignment_url)
             url_data = parse.parse_qs(parsed_url.query)
@@ -971,11 +1348,104 @@ class FanyaCrawler:
                 all_questions.extend(questions)
 
             logger.info(
-                f"作业 {assignment.assignment_name} 获取到 {len(all_questions)} 道题目")
+                f"作业 {assignment.assignment_name} 获取到 {len(all_questions)} 道题目 (已完成，获取正确答案)")
             return all_questions
 
         except Exception as e:
             logger.error(f"获取作业题目失败: {e}")
+            return []
+    
+    def _get_pending_assignment_questions(self, assignment: Assignment) -> List[Question]:
+        """获取待批阅作业的用户提交答案"""
+        try:
+            # 获取重定向 URL 和 standardEnc
+            standard_enc, redirect_url = self._get_standard_enc_and_redirect_url(assignment.assignment_url)
+            assignment.standard_enc = standard_enc
+            
+            if not redirect_url:
+                logger.error(f"无法获取作业 {assignment.assignment_name} 的重定向 URL")
+                return []
+            
+            # 根据重定向 URL 判断使用哪个 API
+            if "work/dowork" in redirect_url:
+                # 未截止的待批阅作业，使用 dowork
+                return self._get_dowork_questions(assignment, redirect_url)
+            else:
+                # 已截止的待批阅作业，使用 view
+                return self._get_view_student_answers(assignment, redirect_url)
+
+        except Exception as e:
+            logger.error(f"获取作业题目失败: {e}")
+            return []
+    
+    def _get_dowork_questions(self, assignment: Assignment, redirect_url: str) -> List[Question]:
+        """获取未截止待批阅作业的用户答案（通过 dowork 页面）"""
+        try:
+            # 从重定向 URL 获取参数
+            parsed_url = urlparse(redirect_url)
+            url_data = parse.parse_qs(parsed_url.query)
+            
+            params = {
+                "courseId": url_data.get("courseId", [""])[0],
+                "classId": url_data.get("classId", [""])[0],
+                "cpi": url_data.get("cpi", [""])[0],
+                "workId": url_data.get("workId", [""])[0],
+                "answerId": url_data.get("answerId", [""])[0],
+                "standardEnc": url_data.get("standardEnc", [""])[0],
+                "enc": url_data.get("enc", [""])[0]
+            }
+
+            response = self.session.get(
+                self.API_ENDPOINTS['work_dowork'],
+                params=params,
+                timeout=30
+            )
+            response.raise_for_status()
+
+            # 使用 html.parser 而不是 lxml，因为 lxml 会移除 h3 内的 p 标签
+            soup = BeautifulSoup(response.text, "html.parser")
+            questions = self._parse_dowork_questions(soup)
+
+            logger.info(
+                f"作业 {assignment.assignment_name} 获取到 {len(questions)} 道题目 (未截止待批阅，获取用户答案)")
+            return questions
+            
+        except Exception as e:
+            logger.error(f"获取 dowork 题目失败: {e}")
+            return []
+    
+    def _get_view_student_answers(self, assignment: Assignment, redirect_url: str) -> List[Question]:
+        """获取已截止待批阅作业的用户答案（通过 view 页面）"""
+        try:
+            # 从重定向 URL 获取参数
+            parsed_url = urlparse(redirect_url)
+            url_data = parse.parse_qs(parsed_url.query)
+            
+            params = {
+                "courseId": url_data.get("courseId", [""])[0],
+                "classId": url_data.get("classId", [""])[0],
+                "cpi": url_data.get("cpi", [""])[0],
+                "workId": url_data.get("workId", [""])[0],
+                "answerId": url_data.get("answerId", [""])[0],
+                "enc": url_data.get("enc", [""])[0]
+            }
+
+            response = self.session.get(
+                self.API_ENDPOINTS['work_view'],
+                params=params,
+                timeout=30
+            )
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, "lxml")
+            questions = self._parse_view_student_questions(soup)
+
+            logger.info(
+                f"作业 {assignment.assignment_name} 获取到 {len(questions)} 道题目 (已截止待批阅，获取用户答案)")
+            return questions
+            
+        except Exception as e:
+            logger.error(f"获取 view 题目失败: {e}")
             return []
 
     def solve_assignment_questions_with_ai(self, assignment: Assignment) -> List[Question]:
@@ -1026,7 +1496,7 @@ class DocumentExporter:
                     if not assignment.questions:
                         continue
 
-                    f.write(f"## {assignment.assignment_name}\n\n")
+                    f.write(f"## {assignment.assignment_name} [{assignment.assignment_status}]\n\n")
 
                     for question in assignment.questions:
                         f.write(f"### {question.question_title}\n\n")
@@ -1039,11 +1509,25 @@ class DocumentExporter:
 
                         # 显示答案或留空
                         if with_answers:
-                            if isinstance(question.correct_answer, list):
-                                f.write(
-                                    "正确答案: " + ", ".join(question.correct_answer) + "\n\n")
-                            else:
-                                f.write(f"正确答案: {question.correct_answer}\n\n")
+                            # 显示正确答案（已完成作业）
+                            if question.correct_answer:
+                                if isinstance(question.correct_answer, list):
+                                    f.write(
+                                        "**正确答案:** " + ", ".join(question.correct_answer) + "\n\n")
+                                else:
+                                    f.write(f"**正确答案:** {question.correct_answer}\n\n")
+                            
+                            # 显示用户答案（待批阅作业）
+                            if question.student_answer:
+                                if isinstance(question.student_answer, list):
+                                    f.write(
+                                        "我的答案: " + ", ".join(question.student_answer) + "\n\n")
+                                else:
+                                    f.write(f"我的答案: {question.student_answer}\n\n")
+                            
+                            # 如果既没有正确答案也没有用户答案
+                            if not question.correct_answer and not question.student_answer:
+                                f.write("答案: ____________________\n\n")
 
                             # 如果包含AI答案，也显示
                             if include_ai and question.ai_generated_answer:
@@ -1056,6 +1540,64 @@ class DocumentExporter:
 
         except Exception as e:
             logger.error(f"Markdown导出失败: {e}")
+
+    def _add_answer_to_doc(self, doc, answer_text: str, prefix: str = "", bold: bool = False):
+        """向 Word 文档添加答案，支持图片插入"""
+        from docx.shared import Inches
+        
+        if not answer_text:
+            return
+        
+        # 检查是否是图片答案
+        if isinstance(answer_text, str) and answer_text.startswith("[图片]"):
+            img_url = answer_text.replace("[图片]", "").strip()
+            if prefix:
+                para = doc.add_paragraph()
+                run = para.add_run(prefix)
+                if bold:
+                    run.bold = True
+            
+            # 下载并插入图片（带防盗链头）
+            try:
+                headers = {
+                    'Referer': 'https://mooc1.chaoxing.com/',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'
+                }
+                response = requests.get(img_url, headers=headers, timeout=30, stream=True)
+                response.raise_for_status()
+                
+                # 使用临时文件保存图片
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        tmp_file.write(chunk)
+                    tmp_path = tmp_file.name
+                
+                # 插入图片到文档
+                doc.add_picture(tmp_path, width=Inches(4))
+                
+                # 清理临时文件
+                os.unlink(tmp_path)
+                
+            except Exception as e:
+                logger.error(f"下载图片失败: {e}")
+                doc.add_paragraph(f"{prefix}[图片下载失败] {img_url}")
+        
+        elif isinstance(answer_text, list):
+            # 填空题多个答案
+            if prefix:
+                para = doc.add_paragraph()
+                run = para.add_run(prefix)
+                if bold:
+                    run.bold = True
+            for i, ans in enumerate(answer_text, 1):
+                self._add_answer_to_doc(doc, ans, prefix=f"第{i}空: ")
+        
+        else:
+            # 普通文本答案
+            para = doc.add_paragraph()
+            run = para.add_run(f"{prefix}{answer_text}")
+            if bold:
+                run.bold = True
 
     def export_word(self, assignments: List[Assignment], with_answers: bool = True, include_ai: bool = False):
         """导出Word格式"""
@@ -1090,8 +1632,8 @@ class DocumentExporter:
                 if not assignment.questions:
                     continue
 
-                # 作业标题
-                doc.add_heading(assignment.assignment_name, level=1)
+                # 作业标题（包含状态）
+                doc.add_heading(f"{assignment.assignment_name} [{assignment.assignment_status}]", level=1)
 
                 for i, question in enumerate(assignment.questions, 1):
                     # 题目标题
@@ -1108,14 +1650,23 @@ class DocumentExporter:
 
                     # 答案部分
                     if with_answers:
-                        ans_para = doc.add_paragraph()
-                        if isinstance(question.correct_answer, list):
-                            ans_text = "正确答案: " + \
-                                ", ".join(question.correct_answer)
-                        else:
-                            ans_text = f"正确答案: {question.correct_answer}"
-                        run = ans_para.add_run(ans_text)
-                        run.bold = True
+                        # 显示正确答案（已完成作业）
+                        if question.correct_answer:
+                            if isinstance(question.correct_answer, list):
+                                self._add_answer_to_doc(doc, question.correct_answer, prefix="正确答案: ", bold=True)
+                            else:
+                                self._add_answer_to_doc(doc, question.correct_answer, prefix="正确答案: ", bold=True)
+                        
+                        # 显示用户答案（待批阅作业）
+                        if question.student_answer:
+                            if isinstance(question.student_answer, list):
+                                self._add_answer_to_doc(doc, question.student_answer, prefix="我的答案: ")
+                            else:
+                                self._add_answer_to_doc(doc, question.student_answer, prefix="我的答案: ")
+                        
+                        # 如果既没有正确答案也没有用户答案
+                        if not question.correct_answer and not question.student_answer:
+                            doc.add_paragraph("答案: ____________________")
 
                         # 如果包含AI答案，也显示
                         if include_ai and question.ai_generated_answer:
@@ -1163,6 +1714,7 @@ class DocumentExporter:
                         "type": question.answer_type,
                         "title": question.question_title,
                         "correct_answer": question.correct_answer,
+                        "student_answer": question.student_answer,
                         "options": question.question_answers
                     }
 
